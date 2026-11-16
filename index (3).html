@@ -1,0 +1,308 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="theme-color" content="#0d1b16">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Esmeralda">
+<title>Esmeralda GBA</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #0d1b16; color: #e8f5ee;
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  body { padding: env(safe-area-inset-top) env(safe-area-inset-right)
+    env(safe-area-inset-bottom) env(safe-area-inset-left); box-sizing: border-box; overscroll-behavior: none; }
+  #menu { display: flex; flex-direction: column; align-items: center; justify-content: center;
+    min-height: 100%; gap: 12px; padding: 24px; box-sizing: border-box; text-align: center; }
+  .gem { width: 64px; height: 64px; }
+  h1 { margin: 0; font-size: 1.8rem; color: #3ddc97; }
+  p { margin: 0; max-width: 28rem; line-height: 1.45; opacity: .85; }
+  form { display: flex; flex-direction: column; gap: 10px; width: 100%; max-width: 340px; text-align: left; }
+  label { font-size: .85rem; opacity: .8; display: flex; flex-direction: column; gap: 4px; }
+  label.check { flex-direction: row; align-items: center; gap: 8px; }
+  input[type=text], input[type=password] { font-size: 1rem; padding: 12px; border-radius: 10px;
+    border: 1px solid #2c5244; background: #13281f; color: #e8f5ee; }
+  .btn { appearance: none; border: 0; border-radius: 14px; padding: 16px 24px; font-size: 1.05rem;
+    font-weight: 600; width: 100%; cursor: pointer; -webkit-tap-highlight-color: transparent; }
+  .primary { background: #3ddc97; color: #06241a; }
+  .primary:disabled { opacity: .5; }
+  .link { background: transparent; color: #9fbfb2; font-size: .85rem; padding: 6px; }
+  #status { min-height: 1.3em; font-size: .92rem; color: #9fe8c6; max-width: 340px; }
+  #status.err { color: #ff9b9b; }
+  .hidden { display: none !important; }
+  #game { width: 100vw; height: 100vh; height: 100dvh; }
+  #toast { position: fixed; top: calc(env(safe-area-inset-top) + 10px); left: 50%; transform: translateX(-50%);
+    background: rgba(6,36,26,.92); color: #e8f5ee; padding: 8px 14px; border-radius: 999px; font-size: .85rem;
+    z-index: 100000; pointer-events: none; opacity: 0; transition: opacity .25s; max-width: 90vw; text-align: center; }
+  #toast.show { opacity: 1; }
+  #cloudBtn { position: fixed; top: calc(env(safe-area-inset-top) + 8px); left: calc(env(safe-area-inset-left) + 8px);
+    z-index: 100000; background: rgba(31,58,48,.85); color: #e8f5ee; border: 0; border-radius: 10px;
+    padding: 8px 10px; font-size: .85rem; font-weight: 600; }
+</style>
+</head>
+<body>
+
+<div id="menu">
+  <svg class="gem" viewBox="0 0 64 64" aria-hidden="true">
+    <polygon points="32,4 56,22 46,58 18,58 8,22" fill="#3ddc97"/>
+    <polygon points="32,4 44,22 32,58 20,22" fill="#7ff0bf"/>
+    <polygon points="8,22 56,22 32,4" fill="#b8f7da" opacity=".7"/>
+  </svg>
+  <h1>Esmeralda GBA</h1>
+  <p>La ROM y las partidas se cargan y se guardan en tu repositorio privado de GitHub.</p>
+
+  <form id="cfgForm" autocomplete="off">
+    <label>Usuario de GitHub <input type="text" id="owner" required autocapitalize="off" spellcheck="false"></label>
+    <label>Repositorio privado <input type="text" id="repo" required value="esmeralda-datos" autocapitalize="off" spellcheck="false"></label>
+    <label>Rama <input type="text" id="branch" required value="main" autocapitalize="off" spellcheck="false"></label>
+    <label>Ruta de la ROM en el repo <input type="text" id="romPath" required value="rom/pokemon-esmeralda.gba" autocapitalize="off" spellcheck="false"></label>
+    <label>Token de GitHub <input type="password" id="token" required autocapitalize="off" spellcheck="false"></label>
+    <label class="check"><input type="checkbox" id="remember" checked> Recordar en este dispositivo</label>
+    <button class="btn primary" id="playBtn" type="submit">▶ Jugar</button>
+    <button class="btn link" id="logoutBtn" type="button">Borrar datos de conexión</button>
+  </form>
+  <div id="status"></div>
+</div>
+
+<div id="game" class="hidden"></div>
+<div id="toast"></div>
+<button id="cloudBtn" class="hidden" type="button">☁️ Subir partida</button>
+
+<script>
+/* ---------- Configuración guardada (solo datos de conexión, nunca partidas) ---------- */
+const CFG_KEY = 'esmeralda-gh-cfg';
+const $ = (id) => document.getElementById(id);
+const fields = ['owner', 'repo', 'branch', 'romPath', 'token'];
+let cfg = {};
+
+function readStoredCfg() {
+  try { return JSON.parse(localStorage.getItem(CFG_KEY) || '{}'); } catch { return {}; }
+}
+function storeCfg(c, remember) {
+  try {
+    if (remember) localStorage.setItem(CFG_KEY, JSON.stringify(c));
+    else localStorage.setItem(CFG_KEY, JSON.stringify({ ...c, token: '' }));
+  } catch {}
+}
+(function fillForm() {
+  const c = readStoredCfg();
+  fields.forEach(f => { if (c[f]) $(f).value = c[f]; });
+})();
+$('logoutBtn').onclick = () => {
+  try { localStorage.removeItem(CFG_KEY); } catch {}
+  $('token').value = '';
+  setStatus('Datos de conexión borrados de este dispositivo.');
+};
+
+function setStatus(t, isErr) { $('status').textContent = t; $('status').classList.toggle('err', !!isErr); }
+let toastTimer;
+function toast(t, ms = 2500) {
+  const el = $('toast'); el.textContent = t; el.classList.add('show');
+  clearTimeout(toastTimer); if (ms) toastTimer = setTimeout(() => el.classList.remove('show'), ms);
+}
+
+/* ---------- API de GitHub ---------- */
+const API = 'https://api.github.com';
+const shas = {}; // sha actual de cada archivo en el repo
+
+function headers(accept) {
+  return {
+    'Authorization': 'Bearer ' + cfg.token,
+    'Accept': accept || 'application/vnd.github+json',
+    'X-GitHub-Api-Version': '2022-11-28'
+  };
+}
+function contentsUrl(path) {
+  return `${API}/repos/${encodeURIComponent(cfg.owner)}/${encodeURIComponent(cfg.repo)}/contents/` +
+    path.split('/').map(encodeURIComponent).join('/');
+}
+async function errorText(r) {
+  let msg = r.status + '';
+  try { const j = await r.json(); if (j.message) msg += ' – ' + j.message; } catch {}
+  if (r.status === 401) msg = 'Token no válido o caducado (401)';
+  if (r.status === 403) msg = 'El token no tiene permiso de escritura/lectura (403)';
+  return msg;
+}
+function b64encode(bytes) {
+  let s = ''; const CH = 0x8000;
+  for (let i = 0; i < bytes.length; i += CH) s += String.fromCharCode.apply(null, bytes.subarray(i, i + CH));
+  return btoa(s);
+}
+function b64decode(str) {
+  const bin = atob(str.replace(/\n/g, '')); const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
+
+async function ghRaw(path, onProgress) {
+  const r = await fetch(contentsUrl(path) + '?ref=' + encodeURIComponent(cfg.branch),
+    { headers: headers('application/vnd.github.raw+json'), cache: 'no-store' });
+  if (r.status === 404) return null;
+  if (!r.ok) throw new Error(await errorText(r));
+  if (!r.body || !onProgress) return new Uint8Array(await r.arrayBuffer());
+  const reader = r.body.getReader(); const chunks = []; let n = 0;
+  for (;;) {
+    const { done, value } = await reader.read(); if (done) break;
+    chunks.push(value); n += value.length; onProgress(n);
+  }
+  const out = new Uint8Array(n); let o = 0;
+  for (const c of chunks) { out.set(c, o); o += c.length; }
+  return out;
+}
+
+// Descarga un archivo y recuerda su sha (necesario para sobrescribirlo luego)
+async function ghGetFile(path) {
+  const r = await fetch(contentsUrl(path) + '?ref=' + encodeURIComponent(cfg.branch),
+    { headers: headers(), cache: 'no-store' });
+  if (r.status === 404) { delete shas[path]; return null; }
+  if (!r.ok) throw new Error(await errorText(r));
+  const meta = await r.json();
+  shas[path] = meta.sha;
+  if (meta.content && meta.encoding === 'base64') return b64decode(meta.content);
+  return await ghRaw(path); // archivos > 1 MB
+}
+
+async function ghPut(path, bytes, message, retry = true) {
+  const body = { message, content: b64encode(bytes), branch: cfg.branch };
+  if (shas[path]) body.sha = shas[path];
+  const r = await fetch(contentsUrl(path), {
+    method: 'PUT', headers: { ...headers(), 'Content-Type': 'application/json' }, body: JSON.stringify(body)
+  });
+  if ((r.status === 409 || r.status === 422) && retry) {
+    // el sha ha cambiado (p. ej. guardaste desde otro dispositivo): lo refrescamos y reintentamos
+    const m = await fetch(contentsUrl(path) + '?ref=' + encodeURIComponent(cfg.branch), { headers: headers(), cache: 'no-store' });
+    if (m.ok) shas[path] = (await m.json()).sha; else delete shas[path];
+    return ghPut(path, bytes, message, false);
+  }
+  if (!r.ok) throw new Error(await errorText(r));
+  shas[path] = (await r.json()).content.sha;
+}
+
+/* ---------- Utilidades de partida ---------- */
+function fnv(bytes) { let h = 0x811c9dc5; for (let i = 0; i < bytes.length; i++) { h ^= bytes[i]; h = Math.imul(h, 16777619); } return (h >>> 0) + ':' + bytes.length; }
+function isBlank(b) { const f = b[0]; if (f !== 0xFF && f !== 0x00) return false; for (let i = 1; i < b.length; i++) if (b[i] !== f) return false; return true; }
+const stamp = () => new Date().toLocaleString('es-ES');
+
+let savPath, statePath, lastHash = null, uploading = false, syncReady = false;
+
+function gm() { return window.EJS_emulator && window.EJS_emulator.gameManager; }
+
+function readSave() {
+  try { const d = gm() && gm().getSaveFile(); return d && d.length ? new Uint8Array(d) : null; } catch { return null; }
+}
+function writeSave(bytes) {
+  const g = gm(); const FS = g.FS; const p = g.getSaveFilePath();
+  const parts = p.split('/'); let cp = '';
+  for (let i = 0; i < parts.length - 1; i++) {
+    if (!parts[i]) continue; cp += '/' + parts[i];
+    if (!FS.analyzePath(cp).exists) FS.mkdir(cp);
+  }
+  if (FS.analyzePath(p).exists) FS.unlink(p);
+  FS.writeFile(p, bytes);
+  g.loadSaveFiles();
+}
+
+async function syncSave(force) {
+  if (!syncReady || uploading) return;
+  const d = readSave();
+  if (!d || isBlank(d)) { if (force) toast('Aún no hay partida que subir'); return; }
+  const h = fnv(d);
+  if (h === lastHash) { if (force) toast('La partida ya está al día en GitHub ✓'); return; }
+  uploading = true; toast('☁️ Subiendo partida…', 0);
+  try {
+    await ghPut(savPath, d, 'Partida guardada ' + stamp());
+    lastHash = h; toast('Partida guardada en GitHub ✓');
+  } catch (e) {
+    toast('⚠️ No se pudo subir la partida: ' + e.message, 5000);
+  } finally { uploading = false; }
+}
+
+/* ---------- Arranque ---------- */
+$('cfgForm').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  fields.forEach(f => cfg[f] = $(f).value.trim());
+  storeCfg(cfg, $('remember').checked);
+  const base = cfg.romPath.split('/').pop().replace(/\.[^.]+$/, '');
+  savPath = `saves/${base}.sav`;
+  statePath = `saves/${base}.state`;
+  $('playBtn').disabled = true;
+
+  try {
+    setStatus('Comprobando la partida guardada…');
+    const cloudSave = await ghGetFile(savPath); // si falla, no arrancamos para no pisar nada
+    setStatus('Descargando ROM…');
+    const rom = await ghRaw(cfg.romPath, n => setStatus(`Descargando ROM… ${(n / 1048576).toFixed(1)} MB`));
+    if (!rom) throw new Error(`No encuentro la ROM en «${cfg.romPath}»`);
+    startEmulator(rom, cfg.romPath.split('/').pop(), cloudSave);
+  } catch (err) {
+    setStatus('Error: ' + err.message + '. Revisa usuario, repositorio, rama y token.', true);
+    $('playBtn').disabled = false;
+  }
+});
+
+function startEmulator(rom, fileName, cloudSave) {
+  $('menu').classList.add('hidden');
+  $('game').classList.remove('hidden');
+
+  window.EJS_player = '#game';
+  window.EJS_core = 'gba';
+  window.EJS_gameName = fileName.replace(/\.[^.]+$/, '');
+  window.EJS_gameUrl = new File([rom], fileName);
+  window.EJS_pathtodata = 'https://cdn.emulatorjs.org/stable/data/';
+  window.EJS_startOnLoaded = false;     // botón de inicio = gesto del usuario (necesario para el sonido en móvil)
+  window.EJS_language = 'es-ES';
+  window.EJS_color = '#3ddc97';
+  window.EJS_backgroundColor = '#0d1b16';
+  window.EJS_disableDatabases = true;   // no cachear ROM en el navegador
+  window.EJS_defaultOptions = { 'save-save-interval': '0' }; // sin guardado periódico en el navegador
+
+  window.EJS_onGameStart = () => {
+    try {
+      if (cloudSave && cloudSave.length) {
+        writeSave(cloudSave);
+        lastHash = fnv(cloudSave);
+        toast('Partida cargada desde GitHub ✓');
+      } else {
+        const cur = readSave(); lastHash = cur ? fnv(cur) : null;
+        toast('No hay partida en GitHub: empieza una nueva');
+      }
+      syncReady = true;
+      $('cloudBtn').classList.remove('hidden');
+      setInterval(() => syncSave(false), 15000); // detecta cuando guardas en el juego
+    } catch (e) {
+      toast('⚠️ No se pudo cargar la partida: ' + e.message + '. El guardado automático está desactivado.', 8000);
+    }
+  };
+
+  // Save states → también al repositorio
+  window.EJS_onSaveState = async ({ state }) => {
+    toast('☁️ Subiendo save state…', 0);
+    try { await ghPut(statePath, new Uint8Array(state), 'Save state ' + stamp()); toast('Save state guardado en GitHub ✓'); }
+    catch (e) { toast('⚠️ Error al subir save state: ' + e.message, 5000); }
+  };
+  window.EJS_onLoadState = async () => {
+    toast('☁️ Descargando save state…', 0);
+    try {
+      const s = await ghGetFile(statePath);
+      if (!s) return toast('No hay ningún save state en GitHub');
+      gm().loadState(s); toast('Save state cargado ✓');
+    } catch (e) { toast('⚠️ Error al cargar save state: ' + e.message, 5000); }
+  };
+
+  const s = document.createElement('script');
+  s.src = window.EJS_pathtodata + 'loader.js';
+  s.onerror = () => toast('⚠️ No se pudo cargar el emulador. Revisa la conexión.', 0);
+  document.body.appendChild(s);
+}
+
+$('cloudBtn').onclick = () => syncSave(true);
+document.addEventListener('visibilitychange', () => { if (document.hidden) syncSave(false); });
+window.addEventListener('beforeunload', (e) => {
+  const d = syncReady && readSave();
+  if (d && !isBlank(d) && fnv(d) !== lastHash) { syncSave(false); e.preventDefault(); e.returnValue = ''; }
+});
+</script>
+</body>
+</html>
