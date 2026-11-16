@@ -180,6 +180,62 @@ async function ghPut(path, bytes, message, retry = true) {
   shas[path] = (await r.json()).content.sha;
 }
 
+// Diagnóstico claro: GitHub responde 404 tanto si el repo no existe como si el token no tiene acceso
+async function checkAccess() {
+  const base = `${API}/repos/${encodeURIComponent(cfg.owner)}/${encodeURIComponent(cfg.repo)}`;
+  const r = await fetch(base, { headers: headers(), cache: 'no-store' });
+  if (r.status === 401) throw new Error('El token no es válido o ha caducado');
+  if (r.status === 404) throw new Error(`El token no puede ver «${cfg.owner}/${cfg.repo}». ` +
+    'Comprueba el nombre, o edita el token y añade ese repositorio en «Repository access»');
+  if (!r.ok) throw new Error(await errorText(r));
+  const repo = await r.json();
+  if (repo.permissions && !repo.permissions.push)
+    throw new Error('El token puede leer pero no escribir: pon «Contents» en «Read and write»');
+  const b = await fetch(`${base}/branches/${encodeURIComponent(cfg.branch)}`, { headers: headers(), cache: 'no-store' });
+  if (b.status === 404) throw new Error(`La rama «${cfg.branch}» no existe; la de tu repo es «${repo.default_branch}»`);
+  if (!b.ok) throw new Error(await errorText(b));
+  const t = await fetch(`${base}/contents?ref=${encodeURIComponent(cfg.branch)}`, { headers: headers(), cache: 'no-store' });
+  if (t.status === 403 || t.status === 404)
+    throw new Error('El token no tiene permiso «Contents». Ponlo en «Read and write»');
+}
+
+// Comprueba que lo descargado es de verdad una ROM de GBA
+function checkRom(b) {
+  const mb = (b.length / 1048576).toFixed(1) + ' MB';
+  const ascii = (s, e) => String.fromCharCode(...b.subarray(s, e));
+  if (b[0] === 0x50 && b[1] === 0x4B) return 'Archivo ZIP (' + mb + '), se descomprimirá';
+  if (ascii(0, 6) === '7z\xBC\xAF\x27\x1C') return 'Archivo 7z (' + mb + '), se descomprimirá';
+  if (ascii(0, 4) === 'Rar!') throw new Error('La ROM está en formato RAR. Descomprímela y sube el archivo .gba');
+  if (b[0] === 0x7B || b[0] === 0x3C) throw new Error('Lo descargado no es una ROM sino texto de GitHub: ' + ascii(0, 120));
+  if (b.length < 0xC0 || b[0xB2] !== 0x96)
+    throw new Error(`El archivo (${mb}) no parece una ROM de Game Boy Advance. ¿Es un .gba? ¿No será de NDS o 3DS?`);
+  const title = ascii(0xA0, 0xAC).replace(/\0/g, '').trim();
+  const code = ascii(0xAC, 0xB0);
+  return `ROM detectada: ${title} [${code}] · ${mb}`;
+}
+
+// Muestra en pantalla el motivo real si el emulador falla
+const origWarn = console.warn.bind(console);
+console.warn = (...args) => {
+  origWarn(...args);
+  if (String(args[0]).includes('Failed to start') || args[0] instanceof Error || (args[1] instanceof Error)) {
+    const e = args.find(a => a instanceof Error) || args[0];
+    showError('Detalle del error: ' + (e && (e.message || e)) + '\n' + (e && e.stack ? e.stack.split('\n').slice(0, 3).join('\n') : ''));
+  }
+};
+window.addEventListener('error', ev => showError('Error: ' + ev.message + ' (' + (ev.filename || '').split('/').pop() + ':' + ev.lineno + ')'));
+window.addEventListener('unhandledrejection', ev => showError('Error: ' + (ev.reason && (ev.reason.message || ev.reason))));
+function showError(t) {
+  let el = $('errBox');
+  if (!el) {
+    el = document.createElement('pre'); el.id = 'errBox';
+    el.style.cssText = 'position:fixed;left:8px;right:8px;bottom:8px;z-index:100001;background:#2a0d0d;color:#ffb3b3;' +
+      'padding:10px;border-radius:10px;font-size:12px;white-space:pre-wrap;max-height:40vh;overflow:auto;margin:0';
+    document.body.appendChild(el);
+  }
+  el.textContent += t + '\n' + 'ROM: ' + ($('status').textContent || '-') + '\n' + navigator.userAgent + '\n\n';
+}
+
 /* ---------- Utilidades de partida ---------- */
 function fnv(bytes) { let h = 0x811c9dc5; for (let i = 0; i < bytes.length; i++) { h ^= bytes[i]; h = Math.imul(h, 16777619); } return (h >>> 0) + ':' + bytes.length; }
 function isBlank(b) { const f = b[0]; if (f !== 0xFF && f !== 0x00) return false; for (let i = 1; i < b.length; i++) if (b[i] !== f) return false; return true; }
@@ -230,12 +286,19 @@ $('cfgForm').addEventListener('submit', async (e) => {
   $('playBtn').disabled = true;
 
   try {
+    setStatus('Comprobando acceso al repositorio…');
+    await checkAccess();
     setStatus('Comprobando la partida guardada…');
     const cloudSave = await ghGetFile(savPath); // si falla, no arrancamos para no pisar nada
     setStatus('Descargando ROM…');
     const rom = await ghRaw(cfg.romPath, n => setStatus(`Descargando ROM… ${(n / 1048576).toFixed(1)} MB`));
     if (!rom) throw new Error(`No encuentro la ROM en «${cfg.romPath}»`);
-    startEmulator(rom, cfg.romPath.split('/').pop(), cloudSave);
+    const info = checkRom(rom);
+    setStatus(info);
+    let fileName = cfg.romPath.split('/').pop();
+    if (/^Archivo ZIP/.test(info)) fileName = fileName.replace(/\.[^.]+$/, '') + '.zip';
+    if (/^Archivo 7z/.test(info)) fileName = fileName.replace(/\.[^.]+$/, '') + '.7z';
+    startEmulator(rom, fileName, cloudSave);
   } catch (err) {
     setStatus('Error: ' + err.message + '. Revisa usuario, repositorio, rama y token.', true);
     $('playBtn').disabled = false;
